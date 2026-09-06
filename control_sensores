@@ -1,0 +1,154 @@
+#include <WiFi.h>
+#include <WiFiUdp.h>
+
+const int sensor_entrada = 34; 
+const int sensor_salida = 35;
+const int sensor_senal = 32; 
+
+unsigned long tiempo_entrada = 0;
+unsigned long tiempo_salida = 0;
+float velocidad_cm = 0;
+const int distancia_cm = 90; 
+
+bool coche_entramo = false; //sirve como "seguro" para que el coche no se detecte varias veces
+bool sensor_libre_antes = true;
+
+const long tiempo_espera_minimo = 50; 
+long t_ultima_deteccion = 0;
+int limite_via = 30;
+
+// CONFIGURACIÓN WIFI 
+const char* ssid = "MOVISTAR_801F";
+const char* password = "F062D689D0147B9D2641";
+const int puerto_udp = 4210;
+// Creación de una IP fija para el radar
+IPAddress ip_local(192, 168, 1, 50); // IP asignado a esta ESP32
+IPAddress gateway(192, 168, 1, 1); // IP del wifi
+IPAddress subnet(255, 255, 255, 0);
+// IPs de los destinatarios
+IPAddress ip_coche(192, 168, 1, 51);
+IPAddress ip_pc(192, 168, 1, 52);
+
+WiFiUDP udp;
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(sensor_entrada, INPUT);
+  pinMode(sensor_salida, INPUT);
+  pinMode(sensor_senal, INPUT);
+
+  WiFi.mode(WIFI_STA);
+  conexion_wifi();
+  udp.begin(puerto_udp); 
+}
+
+void loop() {
+  leer_sensorIR();
+
+  // 1. DETECTAR ENTRADA
+  if (digitalRead(sensor_entrada) == LOW && !coche_entramo) 
+  {
+    tiempo_entrada = millis(); //Guardamos la hora de entrada
+    coche_entramo = true; //conseguimos que el mismo coche no se detecte varias veces
+    Serial.println("VEHICULO DETECTADO EN ENTRADA DE TRAMO");
+    delay(600); //pausa para evitar rebotes del haz de luz
+  }
+
+  // 2. DETECTAR SALIDA
+  if (digitalRead(sensor_salida) == LOW && coche_entramo) 
+  {
+    tiempo_salida = millis(); //Guardamos tiempo de salida
+    coche_entramo = false;
+
+    // Calculos de velocidad
+    velocidad_cm = calcular_velocidad(tiempo_entrada, tiempo_salida, distancia_cm);
+
+    // Mostrar resultados
+    Serial.println("VEHICULO DETECTADO EN SALIDA");
+    Serial.println("Velocidad media: "); Serial.print(velocidad_cm, 2); Serial.println(" cm/s");
+    evaluar_velocidad(velocidad_cm);
+    delay(600); //pausa para evitar rebotes
+    
+    // Envio de datos al PC
+    enviarUDP(ip_pc, "Velocidad media: " + String(velocidad_cm, 2) + " cm/s");
+  }
+}
+
+
+float calcular_velocidad(unsigned long t_entrada, unsigned long t_salida, float distancia)
+{
+  float tiempo_total = (t_salida - t_entrada) / 1000.0; //de milisegundos a segundos
+  return distancia / tiempo_total; 
+}
+
+
+void evaluar_velocidad(float velocidad)
+{
+  if (velocidad > limite_via)
+  {
+    enviarUDP(ip_pc, "Exceso de velocidad");
+    Serial.println("Exceso de velocidad");
+  }
+  else 
+  {
+    enviarUDP(ip_pc, "Velocidad dentro del limite permitido");
+    Serial.println("¡Velocidad dentro del límite permitido");
+  }
+
+}
+
+
+void leer_sensorIR()
+{
+  bool sensor_libre_ahora = (digitalRead(sensor_senal) == HIGH); //si el sensor esta en high, bool = true, 
+                                                                 //sensor en low, bool = false
+
+  bool haz_cortado = sensor_libre_antes && !sensor_libre_ahora; //primera detección de corte solo si 
+                                                                 //el sensor estaba libre y ahora no
+  bool espera_ok = (millis() - t_ultima_deteccion) > tiempo_espera_minimo; //"antirrebotes"
+
+  if (haz_cortado && espera_ok)
+  {
+    t_ultima_deteccion = millis();
+
+    Serial.println("SEÑAL DE VÍA DETECTADA");
+    Serial.print("Limite indicado: ");
+    Serial.println(limite_via);
+
+    // Envio del dato a la otra ESP32
+    enviarUDP(ip_coche, "SENAL:" + String(limite_via));
+    enviarUDP(ip_pc, "SENAL:" + String(limite_via));
+  }
+
+  sensor_libre_antes = sensor_libre_ahora; 
+}
+
+
+void conexion_wifi()
+{
+  WiFi.config(ip_local, gateway, subnet);
+  WiFi.begin(ssid, password);
+
+  Serial.print("Conectando a: ");
+  Serial.print(ssid);
+
+  // Esperar a conectarse
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(200);
+    Serial.print("...");
+  }
+
+  Serial.print("Conectado. IP del radar: ");
+  Serial.println(WiFi.localIP());
+}
+
+
+void enviarUDP(IPAddress destino, String mensaje)
+// Envio de string para poder enviar tipos de datos distintos
+{
+  udp.beginPacket(destino, puerto_udp);
+  udp.print(mensaje);
+  udp.endPacket();
+}
